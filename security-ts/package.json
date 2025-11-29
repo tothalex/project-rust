@@ -1,0 +1,38 @@
+{
+  "name": "security-ts",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "npx tsx src/index.ts",
+    "test": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.20.0",
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/bcrypt": "^5.0.0",
+    "@types/node": "^24.10.1",
+    "@types/secp256k1": "^4.0.3",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "jiti": "^2.6.1",
+    "prettier": "3.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.0",
+    "vitest": "^4.0.14"
+  },
+  "dependencies": {
+    "bcrypt": "^5.0.1",
+    "bls-eth-wasm": "^1.0.3",
+    "bls-wasm": "^0.4.7",
+    "got": "^14.6.5",
+    "jose-node-cjs-runtime": "^4.3.8",
+    "key-encoder": "^2.0.3",
+    "secp256k1": "^4.0.2"
+  }
+}

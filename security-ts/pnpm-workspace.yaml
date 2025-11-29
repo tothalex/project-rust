@@ -1,0 +1,4 @@
+onlyBuiltDependencies:
+  - bcrypt
+  - esbuild
+  - secp256k1
