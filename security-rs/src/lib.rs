@@ -1,68 +1,24 @@
-// ============================================================================
-// Security Library - BLS Threshold Secret Sharing
-// ============================================================================
-//
-// This library implements threshold secret sharing using BLS12-381 elliptic curve
-// cryptography with PVSH (Publicly Verifiable Secret Handoff) encryption.
-//
-// ## Modules
-//
-// - `types`: All type definitions (structs, enums)
-// - `crypto`: Cryptographic primitives (BLS, secret sharing, PVSH)
-// - `device`: Device storage operations
-// - `threshold`: Threshold secret sharing operations
-//
-// ## Usage
-//
-// ```rust
-// use security::*;
-//
-// // Initialize BLS library
-// init_bls();
-//
-// // Generate device storage
-// let storage = generate_device_storage("My Device");
-//
-// // Generate threshold contribution
-// let members = vec![/* ... */];
-// let contribution = generate_contribution(3, &members)?;
-//
-// // Generate actor share
-// let actor_share = generate_actor_share(
-//     "actor-id",
-//     &actor_contract,
-//     "my-id",
-//     "my-secret-key",
-// )?;
-// ```
-
-// Module declarations
 pub mod crypto;
 pub mod device;
-mod http;
-pub mod threshold;
 pub mod types;
 
-// Re-export commonly used types
-pub use types::*;
-
-// Re-export crypto functions
-pub use crypto::{generate_id_hex, generate_keypair_hex, init_bls};
-
-// Re-export device functions
+pub use crypto::generate_id_hex;
+pub use crypto::generate_keypair_hex;
+pub use crypto::init_bls;
+pub use crypto::threshold::{
+    calculate_threshold_keys, generate_actor_share, generate_contribution,
+};
 pub use device::generate_device_storage;
-
-// Re-export threshold functions
-pub use threshold::{calculate_threshold_keys, generate_actor_share, generate_contribution};
-
-// ============================================================================
-// Tests
-// ============================================================================
+pub use types::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crypto::ffi::*;
     use crypto::secret_sharing::{fr_evaluate_polynomial, fr_lagrange_interpolation};
+    use crypto::{serialize_fr, sign};
+    use hex;
+    use std::mem;
     use std::sync::Once;
 
     static INIT: Once = Once::new();
@@ -80,15 +36,9 @@ mod tests {
         let id1 = generate_id_hex();
         let id2 = generate_id_hex();
 
-        // IDs should be different
         assert_ne!(id1, id2);
-
-        // IDs should be non-empty hex strings
         assert!(!id1.is_empty());
         assert!(!id2.is_empty());
-
-        println!("ID 1: {}", id1);
-        println!("ID 2: {}", id2);
     }
 
     #[test]
@@ -98,26 +48,31 @@ mod tests {
         let keypair1 = generate_keypair_hex();
         let keypair2 = generate_keypair_hex();
 
-        // Keys should be different each time
         assert_ne!(keypair1.secret_key, keypair2.secret_key);
         assert_ne!(keypair1.public_key, keypair2.public_key);
 
-        // Keys should be hex strings (non-empty)
         assert!(!keypair1.secret_key.is_empty());
         assert!(!keypair1.public_key.is_empty());
+    }
 
-        println!("Keypair 1 Secret: {}", keypair1.secret_key);
-        println!("Keypair 1 Public: {}", keypair1.public_key);
+    #[test]
+    fn test_signature_generation() {
+        initialize();
+
+        let keypair = generate_keypair_hex();
+        let test_data = b"Hello, World!";
+        let signature = sign(test_data, &keypair.secret_key).expect("Failed to sign data");
+
+        assert!(!signature.is_empty());
+        assert_eq!(signature.len() % 2, 0, "Signature should be valid hex");
     }
 
     #[test]
     fn test_generate_device_storage() {
         initialize();
 
-        // Generate device storage
         let storage = generate_device_storage("Test Device");
 
-        // Verify structure
         assert_eq!(storage.name, "Test Device");
         assert!(!storage.id.is_empty());
         assert!(!storage.sm.is_empty());
@@ -126,98 +81,200 @@ mod tests {
         assert!(!storage.shared_device_data.sm.is_empty());
         assert!(!storage.shared_device_data.pm.is_empty());
         assert_eq!(storage.shared_device_data.actor_shares.len(), 0);
-
-        println!("\n=== Device Storage Generated ===");
-        println!("Device ID: {}", storage.id);
-        println!("Device Secret Key: {}", storage.sm);
-        println!("Device Public Key: {}", storage.pm);
-        println!("Shared Data ID: {}", storage.shared_device_data.id);
-        println!("Shared Secret Key: {}", storage.shared_device_data.sm);
-        println!("Shared Public Key: {}", storage.shared_device_data.pm);
     }
 
     #[test]
     fn test_secret_sharing() {
         initialize();
 
-        println!("\n=== Testing Secret Sharing (Shamir's Threshold) ===");
+        unsafe {
+            let mut secret: mclBnFr = mem::zeroed();
+            mclBnFr_setByCSPRNG(&mut secret);
+            let secret_hex = hex::encode(serialize_fr(&secret));
 
-        // Create a secret (random Fr element)
-        use mcl_rust::Fr;
-        let mut secret = Fr::zero();
-        secret.set_by_csprng();
-        println!("Original Secret: {}", secret.get_str(16));
+            let threshold = 3;
+            let mut coefficients = vec![secret];
+            for _ in 1..threshold {
+                let mut coeff: mclBnFr = mem::zeroed();
+                mclBnFr_setByCSPRNG(&mut coeff);
+                coefficients.push(coeff);
+            }
 
-        // Create polynomial coefficients (threshold = 3)
-        // P(x) = secret + a1*x + a2*x^2
-        let threshold = 3;
-        let mut coefficients = vec![secret.clone()];
-        for _ in 1..threshold {
-            let mut coeff = Fr::zero();
-            coeff.set_by_csprng();
-            coefficients.push(coeff);
+            let num_parties = 5;
+            let mut ids = Vec::new();
+            let mut shares = Vec::new();
+
+            for i in 1..=num_parties {
+                let mut id: mclBnFr = mem::zeroed();
+                mclBnFr_setInt(&mut id, i);
+                ids.push(id);
+
+                let share =
+                    fr_evaluate_polynomial(&coefficients, &id).expect("Failed to generate share");
+                shares.push(share);
+            }
+
+            let ids_subset = vec![ids[0], ids[1], ids[2]];
+            let shares_subset = vec![shares[0], shares[1], shares[2]];
+
+            let recovered = fr_lagrange_interpolation(&ids_subset, &shares_subset)
+                .expect("Failed to recover secret");
+
+            let recovered_hex = hex::encode(serialize_fr(&recovered));
+
+            assert_eq!(recovered_hex, secret_hex, "Secret recovery failed!");
+
+            let ids_subset2 = vec![ids[1], ids[2], ids[3]];
+            let shares_subset2 = vec![shares[1], shares[2], shares[3]];
+
+            let recovered2 = fr_lagrange_interpolation(&ids_subset2, &shares_subset2)
+                .expect("Failed to recover secret with second subset");
+
+            let recovered2_hex = hex::encode(serialize_fr(&recovered2));
+            assert_eq!(
+                recovered2_hex, secret_hex,
+                "Secret recovery with different subset failed!"
+            );
         }
+    }
 
-        // Generate shares for 5 parties (IDs: 1, 2, 3, 4, 5)
-        let num_parties = 5;
-        let mut ids = Vec::new();
-        let mut shares = Vec::new();
+    #[test]
+    fn test_generator_consistency() {
+        initialize();
 
-        for i in 1..=num_parties {
-            let mut id = Fr::zero();
-            id.set_int(i);
-            ids.push(id.clone());
+        unsafe {
+            let mut test_secret: mclBnFr = mem::zeroed();
+            mclBnFr_setInt(&mut test_secret, 42);
 
-            // Evaluate polynomial at this ID to get the share
-            let share =
-                fr_evaluate_polynomial(&coefficients, &id).expect("Failed to generate share");
-            shares.push(share.clone());
+            let pk1 = crypto::derive_public_key_g2(&test_secret);
 
-            println!("Party {}: Share = {}", i, share.get_str(16));
+            let helper_g2 = crypto::get_g2_generator();
+            let mut pk2: mclBnG2 = mem::zeroed();
+            mclBnG2_mul(&mut pk2, &helper_g2, &test_secret);
+
+            let pk1_hex = hex::encode(crypto::serialize_g2(&pk1));
+            let pk2_hex = hex::encode(crypto::serialize_g2(&pk2));
+
+            assert_eq!(pk1_hex, pk2_hex, "Generators are inconsistent!");
         }
+    }
 
-        // Now recover secret using any 3 shares (threshold)
-        let ids_subset = vec![ids[0].clone(), ids[1].clone(), ids[2].clone()];
-        let shares_subset = vec![shares[0].clone(), shares[1].clone(), shares[2].clone()];
+    #[test]
+    fn test_pvsh_roundtrip() {
+        initialize();
 
-        let recovered = fr_lagrange_interpolation(&ids_subset, &shares_subset)
-            .expect("Failed to recover secret");
+        use crypto::pvsh::{pvsh_decode_g2, pvsh_encode_g2, pvsh_verify_g2};
+        use crypto::{deserialize_fr, deserialize_g2, get_g2_generator};
 
-        println!("Recovered Secret: {}", recovered.get_str(16));
-        println!("Original  Secret: {}", secret.get_str(16));
+        unsafe {
+            let receiver_keypair = generate_keypair_hex();
+            let receiver_id_hex = generate_id_hex();
+            let receiver_id_bytes = hex::decode(&receiver_id_hex).unwrap();
+            let receiver_id = deserialize_fr(&receiver_id_bytes).unwrap();
+            let receiver_pk_bytes = hex::decode(&receiver_keypair.public_key).unwrap();
+            let receiver_pk = deserialize_g2(&receiver_pk_bytes).unwrap();
+            let receiver_sk_bytes = hex::decode(&receiver_keypair.secret_key).unwrap();
+            let receiver_sk = deserialize_fr(&receiver_sk_bytes).unwrap();
 
-        // Verify recovery worked
-        assert_eq!(
-            secret.get_str(16),
-            recovered.get_str(16),
-            "Secret recovery failed!"
-        );
+            let mut original_secret: mclBnFr = mem::zeroed();
+            mclBnFr_setByCSPRNG(&mut original_secret);
+            let original_hex = hex::encode(serialize_fr(&original_secret));
 
-        println!("✓ Secret sharing and recovery successful!");
+            let helper_g2 = get_g2_generator();
 
-        // Test with different subset (parties 2, 3, 4)
-        let ids_subset2 = vec![ids[1].clone(), ids[2].clone(), ids[3].clone()];
-        let shares_subset2 = vec![shares[1].clone(), shares[2].clone(), shares[3].clone()];
+            let esh = pvsh_encode_g2(&receiver_id, &receiver_pk, &original_secret, &helper_g2)
+                .expect("PVSH encode failed");
 
-        let recovered2 = fr_lagrange_interpolation(&ids_subset2, &shares_subset2)
-            .expect("Failed to recover secret with second subset");
+            let original_pub = crypto::derive_public_key_g2(&original_secret);
 
-        assert_eq!(
-            secret.get_str(16),
-            recovered2.get_str(16),
-            "Secret recovery with different subset failed!"
-        );
+            match pvsh_verify_g2(&receiver_id, &receiver_pk, &original_pub, &esh, &helper_g2) {
+                Ok(()) => (),
+                Err(e) => panic!("PVSH verification failed: {}", e),
+            }
 
-        println!("✓ Recovery with different subset also successful!");
+            let decoded_secret = pvsh_decode_g2(&receiver_id, &receiver_pk, &receiver_sk, &esh)
+                .expect("PVSH decode failed");
+            let decoded_hex = hex::encode(serialize_fr(&decoded_secret));
+
+            assert_eq!(
+                original_hex, decoded_hex,
+                "Decoded secret doesn't match original!"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contribution_with_both_pg_methods() {
+        initialize();
+
+        let member1_kp = generate_keypair_hex();
+        let member1_id = generate_id_hex();
+        let member2_kp = generate_keypair_hex();
+        let member2_id = generate_id_hex();
+
+        let members = vec![
+            Member {
+                id: member1_id.clone(),
+                pm: member1_kp.public_key.clone(),
+            },
+            Member {
+                id: member2_id.clone(),
+                pm: member2_kp.public_key.clone(),
+            },
+        ];
+
+        let threshold = 2;
+        let contribution =
+            generate_contribution(threshold, &members).expect("Failed to generate contribution");
+
+        use crypto::{deserialize_fr, deserialize_g2, get_g2_generator, pvsh_decode_g2};
+        unsafe {
+            let member_id_bytes = hex::decode(&member1_id).unwrap();
+            let member_id_fr = deserialize_fr(&member_id_bytes).unwrap();
+            let member_pk_bytes = hex::decode(&member1_kp.public_key).unwrap();
+            let member_pk = deserialize_g2(&member_pk_bytes).unwrap();
+            let member_sk_bytes = hex::decode(&member1_kp.secret_key).unwrap();
+            let member_sk = deserialize_fr(&member_sk_bytes).unwrap();
+
+            let esh = &contribution.esh[0].esh;
+
+            let decoded_share = pvsh_decode_g2(&member_id_fr, &member_pk, &member_sk, esh)
+                .expect("Failed to decode share");
+
+            let pg_bytes_0 = hex::decode(&contribution.pg[0]).unwrap();
+            let pg0 = deserialize_g2(&pg_bytes_0).unwrap();
+            let pg_bytes_1 = hex::decode(&contribution.pg[1]).unwrap();
+            let pg1 = deserialize_g2(&pg_bytes_1).unwrap();
+
+            let mut pg1_times_id: mclBnG2 = mem::zeroed();
+            mclBnG2_mul(&mut pg1_times_id, &pg1, &member_id_fr);
+            let mut expected_ph: mclBnG2 = mem::zeroed();
+            mclBnG2_add(&mut expected_ph, &pg0, &pg1_times_id);
+
+            let helper_g2 = get_g2_generator();
+            let mut actual_ph: mclBnG2 = mem::zeroed();
+            mclBnG2_mul(&mut actual_ph, &helper_g2, &decoded_share);
+
+            let expected_ph_hex = hex::encode(crypto::serialize_g2(&expected_ph));
+            let actual_ph_hex = hex::encode(crypto::serialize_g2(&actual_ph));
+
+            assert_eq!(
+                expected_ph_hex, actual_ph_hex,
+                "PH mismatch! PVSH verification will fail."
+            );
+
+            use crypto::pvsh::pvsh_verify_g2;
+            match pvsh_verify_g2(&member_id_fr, &member_pk, &expected_ph, esh, &helper_g2) {
+                Ok(()) => (),
+                Err(e) => panic!("PVSH verification failed: {}", e),
+            }
+        }
     }
 
     #[test]
     fn test_generate_contribution() {
         initialize();
 
-        println!("\n=== Testing generateContribution() ===");
-
-        // Create test members
         let members = vec![
             Member {
                 id: generate_id_hex(),
@@ -241,17 +298,10 @@ mod tests {
             },
         ];
 
-        // Generate contribution with threshold = 3
         let threshold = 3;
         let contribution =
             generate_contribution(threshold, &members).expect("Failed to generate contribution");
 
-        println!("Threshold: {}", threshold);
-        println!("Number of members: {}", members.len());
-        println!("Number of public generators: {}", contribution.pg.len());
-        println!("Number of encrypted shares: {}", contribution.esh.len());
-
-        // Verify structure
         assert_eq!(
             contribution.pg.len(),
             threshold,
@@ -263,44 +313,28 @@ mod tests {
             "Should have one encrypted share per member"
         );
 
-        // Verify each member has a share
         for (i, member) in members.iter().enumerate() {
             let esh = &contribution.esh[i];
             assert_eq!(esh.receiver_id, member.id);
             assert_eq!(esh.receiver_pk, member.pm);
             assert!(!esh.esh.is_empty(), "Encrypted share should not be empty");
-            println!(
-                "Member {}: ID={}, ESH={}",
-                i + 1,
-                &esh.receiver_id[..16],
-                &esh.esh[..32]
-            );
         }
-
-        println!("✓ Contribution generated successfully!");
-        println!("\n✅ Using FULL PVSH encryption with pairing operations!");
     }
 
     #[test]
     fn test_generate_actor_share() {
         initialize();
 
-        println!("\n=== Testing generateActorShare() - Full Threshold Workflow ===");
-
-        // Simulate 3 parties participating in threshold secret sharing
-        let threshold = 2; // Need 2 parties to reconstruct
+        let threshold = 2;
         let num_parties = 3;
 
-        // Create parties with IDs and keys
         let mut parties = Vec::new();
-        for i in 0..num_parties {
+        for _ in 0..num_parties {
             let id = generate_id_hex();
             let keypair = generate_keypair_hex();
             parties.push((id, keypair));
-            println!("Party {}: ID={}", i + 1, &parties[i].0[..16]);
         }
 
-        // Create members list (all parties)
         let members: Vec<Member> = parties
             .iter()
             .map(|(id, keypair)| Member {
@@ -309,18 +343,10 @@ mod tests {
             })
             .collect();
 
-        // Each party generates a contribution
         let mut all_contributions = Vec::new();
         for i in 0..num_parties {
             let contribution = generate_contribution(threshold, &members)
                 .expect("Failed to generate contribution");
-
-            println!(
-                "\nParty {} contribution: {} public generators, {} shares",
-                i + 1,
-                contribution.pg.len(),
-                contribution.esh.len()
-            );
 
             all_contributions.push(ReceivedContribution {
                 sender_id: parties[i].0.clone(),
@@ -328,7 +354,6 @@ mod tests {
             });
         }
 
-        // Create an actor contract
         let actor_contract = ActorContract {
             threshold,
             new_members: members.clone(),
@@ -343,8 +368,6 @@ mod tests {
             },
         };
 
-        // Each party recovers their actor share
-        println!("\n--- Recovering Actor Shares ---");
         for i in 0..num_parties {
             let actor_id = format!("actor-{}", i + 1);
             let (party_id, party_keypair) = &parties[i];
@@ -356,15 +379,6 @@ mod tests {
                 &party_keypair.secret_key,
             ) {
                 Ok(actor_share) => {
-                    println!("\n Party {} recovered actor share:", i + 1);
-                    println!("  Actor ID: {}", actor_share.actor_id);
-                    println!("  Share Code: {}", actor_share.share_code);
-                    println!("  PG (master): {}", &actor_share.pg[..32]);
-                    println!("  SH (secret): {}", &actor_share.sh[..32]);
-                    println!("  PH (public): {}", &actor_share.ph[..32]);
-                    println!("  Number of public shares: {}", actor_share.phs.len());
-
-                    // Verify structure
                     assert_eq!(actor_share.actor_id, actor_id);
                     assert_eq!(actor_share.share_code, "test-share-123");
                     assert!(!actor_share.pg.is_empty(), "PG should not be empty");
@@ -372,8 +386,8 @@ mod tests {
                     assert!(!actor_share.ph.is_empty(), "PH should not be empty");
                     assert_eq!(
                         actor_share.phs.len(),
-                        num_parties,
-                        "Should have public shares for all parties"
+                        threshold,
+                        "Should have public shares for threshold number of contributors"
                     );
                 }
                 Err(e) => {
@@ -381,11 +395,108 @@ mod tests {
                 }
             }
         }
+    }
 
-        println!("\n✓ All parties successfully recovered their actor shares!");
-        println!("\n✅ PVSH verification and decryption are FULLY IMPLEMENTED!");
-        println!(
-            "All shares are cryptographically verified and decrypted using pairing operations."
+    #[test]
+    fn test_pvsh_with_fixed_values() {
+        initialize();
+
+        use crypto::{
+            deserialize_fr, deserialize_g2, get_g2_generator, pvsh_decode_g2, pvsh_encode_g2,
+            pvsh_verify_g2,
+        };
+
+        // Fixed values from Dart test
+        let id_hex = "4a281f344ca08e3ead4089a3aec4ff1c6e9c2d09c55fcd75dbbdd76e1a2e5742";
+        let secret_key_hex = "cef20755f3f0af479227059165fe81779be3a46b677ec5a8511b3786e5269d65";
+        let public_key_hex = "9bac11ab883ac3b19b49be33aa0924ca01a4111e0ec59b50becea424677b0473438cb5ae31857531d0c87c156a70f10f89db3157d5598959a679a50e7f2291522569ec4f873e3e6117de843f81de723dc483688faa80fbf84514539d2e451418";
+
+        // id1Keys - the receiver's keypair
+        let receiver_secret_key_hex =
+            "963d51afb6ab2493e1e5ee58562e43e1f8aef47f980b9ba22a197cef1abfaf1a";
+        let receiver_public_key_hex = "a7fccf1965b9f01b52264e0df8a6806b956a2386d555ade094a41061864204365f9a5c812be2501aa9efa543a9a61605a97ca3fe02a40e17a8cc0b96be411adb42b696e5aedcd124a64068a3c00e0eabc7701a73c4c503bcde3114bfd37f980d";
+
+        // Deserialize the values
+        let id_bytes = hex::decode(id_hex).unwrap();
+        let id = deserialize_fr(&id_bytes).expect("Failed to deserialize ID");
+
+        let sk_bytes = hex::decode(secret_key_hex).unwrap();
+        let sk = deserialize_fr(&sk_bytes).expect("Failed to deserialize secret key");
+
+        let pk_bytes = hex::decode(public_key_hex).unwrap();
+        let pk = deserialize_g2(&pk_bytes).expect("Failed to deserialize public key");
+
+        let receiver_sk_bytes = hex::decode(receiver_secret_key_hex).unwrap();
+        let receiver_sk =
+            deserialize_fr(&receiver_sk_bytes).expect("Failed to deserialize receiver secret key");
+
+        let receiver_pk_bytes = hex::decode(receiver_public_key_hex).unwrap();
+        let receiver_pk =
+            deserialize_g2(&receiver_pk_bytes).expect("Failed to deserialize receiver public key");
+
+        // Get G2 generator
+        let helper_g2 = get_g2_generator();
+
+        // PVSH Encode
+        let esh = pvsh_encode_g2(&id, &receiver_pk, &sk, &helper_g2).expect("PVSH encode failed");
+
+        // PVSH Verify
+        match pvsh_verify_g2(&id, &receiver_pk, &pk, &esh, &helper_g2) {
+            Ok(()) => println!("PVSH verification passed"),
+            Err(e) => panic!("PVSH verification failed: {}", e),
+        }
+
+        // PVSH Decode
+        let decoded_sk =
+            pvsh_decode_g2(&id, &receiver_pk, &receiver_sk, &esh).expect("PVSH decode failed");
+
+        // Verify decoded secret matches original
+        let decoded_hex = hex::encode(serialize_fr(&decoded_sk));
+        assert_eq!(
+            secret_key_hex, decoded_hex,
+            "Decoded secret key doesn't match original!"
+        );
+    }
+
+    #[test]
+    fn test_key_derivation_from_fixed_values() {
+        initialize();
+
+        use crypto::{derive_public_key_g2, deserialize_fr, serialize_g2};
+
+        // Test that we can derive the correct public key from the secret key
+        let secret_key_hex = "cef20755f3f0af479227059165fe81779be3a46b677ec5a8511b3786e5269d65";
+        let expected_public_key_hex = "9bac11ab883ac3b19b49be33aa0924ca01a4111e0ec59b50becea424677b0473438cb5ae31857531d0c87c156a70f10f89db3157d5598959a679a50e7f2291522569ec4f873e3e6117de843f81de723dc483688faa80fbf84514539d2e451418";
+
+        let sk_bytes = hex::decode(secret_key_hex).unwrap();
+        let sk = deserialize_fr(&sk_bytes).expect("Failed to deserialize secret key");
+
+        let derived_pk = derive_public_key_g2(&sk);
+        let derived_pk_hex = hex::encode(serialize_g2(&derived_pk));
+
+        assert_eq!(
+            expected_public_key_hex, derived_pk_hex,
+            "Derived public key doesn't match expected value"
+        );
+    }
+
+    #[test]
+    fn test_id_deserialization() {
+        initialize();
+
+        use crypto::{deserialize_fr, serialize_fr};
+
+        let id_hex = "4a281f344ca08e3ead4089a3aec4ff1c6e9c2d09c55fcd75dbbdd76e1a2e5742";
+
+        let id_bytes = hex::decode(id_hex).unwrap();
+        let id = deserialize_fr(&id_bytes).expect("Failed to deserialize ID");
+
+        // Serialize back and verify it matches
+        let serialized_hex = hex::encode(serialize_fr(&id));
+
+        assert_eq!(
+            id_hex, serialized_hex,
+            "ID serialization/deserialization roundtrip failed"
         );
     }
 }

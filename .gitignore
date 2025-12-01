@@ -1,3 +1,6 @@
 node_modules
 target
 .claude
+
+# Benchmark results (timestamped, auto-generated)
+benchmark-results/

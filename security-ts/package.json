@@ -6,7 +6,9 @@
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
     "start": "npx tsx src/index.ts",
-    "test": "vitest"
+    "test": "vitest",
+    "bench": "vitest bench",
+    "bench:perf": "tsx src/benchmarks/performance.ts"
   },
   "keywords": [],
   "author": "",
